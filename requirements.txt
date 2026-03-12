@@ -1,7 +1,15 @@
-streamlit
 pandas
 numpy
 yfinance
+requests
+pyarrow
+sqlalchemy
+psycopg2-binary
+redis
+ta
+statsmodels
 scikit-learn
+torch
 tensorflow
-matplotlib
+xgboost
+schedule
