@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
+
+try:
+    from scipy.signal import find_peaks
+except Exception:  # noqa: BLE001
+    find_peaks = None
 
 
 class CycleRegimeDetector:
@@ -40,7 +44,13 @@ class CycleRegimeDetector:
         if rolling_std.empty:
             return 0.0
         compression = float((rolling_std.quantile(0.2) - rolling_std.iloc[-1]) / (rolling_std.quantile(0.2) + 1e-8))
-        peaks, _ = find_peaks(close.values[-(window + 5):])
-        breakout_hint = 1.0 if len(peaks) >= 2 and close.iloc[-1] > close.iloc[-(window + 5):].max() * 0.99 else 0.0
+        if find_peaks is not None:
+            peaks, _ = find_peaks(close.values[-(window + 5):])
+            n_peaks = len(peaks)
+        else:
+            # fallback simple: maxima locaux
+            arr = close.values[-(window + 5):]
+            n_peaks = int(((arr[1:-1] > arr[:-2]) & (arr[1:-1] > arr[2:])).sum()) if len(arr) > 2 else 0
+        breakout_hint = 1.0 if n_peaks >= 2 and close.iloc[-1] > close.iloc[-(window + 5):].max() * 0.99 else 0.0
         raw = max(0.0, compression) * 70 + breakout_hint * 30
         return float(np.clip(raw, 0, 100))
