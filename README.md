@@ -1,6 +1,6 @@
-# Mon IA Bourse - Plateforme Quant Deep Learning
+# Mon IA Bourse - Système autonome quantitatif
 
-## Lancement rapide
+## Run
 
 ```bash
 python -m venv .venv
@@ -15,14 +15,18 @@ python app.py
 python scripts/scheduler.py
 ```
 
-## Structure du projet
+## Sortie par actif
 
-- `data/` collecte + stockage data lake
-- `features/` feature engineering technique et statistique
-- `models/` modèles deep learning et ensemble
-- `training/` pipeline d'entraînement/validation temporelle
-- `backtesting/` métriques et moteur d'évaluation stratégie
-- `predictions/` formatage sorties probabilistes
-- `utils/` modules distribués, risque, apprentissage continu
-- `config/` configuration centralisée
-- `docs/` documentation technique
+- prob_up / prob_down
+- confidence
+- market_regime
+- cycle_score
+- explosion_score
+- smart_money_score
+- strategy_recommended
+- risk_position_pct
+
+## Robustesse runtime
+
+- Si `torch` n'est pas installé, le pipeline bascule automatiquement sur un modèle sklearn (fallback explicite).
+- Le statut RL/GNN est signalé dans la sortie (`rl_status`, `gnn_status`).

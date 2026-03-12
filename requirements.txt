@@ -1,5 +1,6 @@
 pandas
 numpy
+scipy
 yfinance
 requests
 pyarrow
@@ -13,3 +14,6 @@ torch
 tensorflow
 xgboost
 schedule
+stable-baselines3
+gymnasium
+ccxt

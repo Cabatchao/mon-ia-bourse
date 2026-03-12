@@ -9,7 +9,12 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
+
+try:
+    import yfinance as yf
+except Exception:  # noqa: BLE001
+    yf = None
+
 from pandas import DataFrame
 
 from config.settings import DATA_DIR, DATA_SOURCES
@@ -25,7 +30,7 @@ class AssetRequest:
 
 
 class DataPipeline:
-    """Collecte les séries OHLCV, macro et sentiment dans un schéma unique."""
+    """Collecte OHLCV + enrichissements macro/sentiment + microstructure si dispo."""
 
     def __init__(self) -> None:
         self.raw_dir = DATA_DIR / "raw"
@@ -34,7 +39,7 @@ class DataPipeline:
         self.curated_dir.mkdir(parents=True, exist_ok=True)
 
     def fetch_yahoo(self, request: AssetRequest) -> DataFrame:
-        if not DATA_SOURCES.yahoo_enabled:
+        if not DATA_SOURCES.yahoo_enabled or yf is None:
             return pd.DataFrame()
         data = yf.download(request.symbol, start=request.start, progress=False, auto_adjust=False)
         if data.empty:
@@ -43,7 +48,26 @@ class DataPipeline:
         data["symbol"] = request.symbol
         data["market"] = request.market
         data["source"] = "yahoo"
-        return data.reset_index().rename(columns={"Date": "timestamp", "date": "timestamp"})
+        data = data.reset_index().rename(columns={"Date": "timestamp", "date": "timestamp"})
+        data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True).dt.tz_localize(None)
+        return data
+
+    def fetch_binance_orderbook_proxy(self, symbol: str) -> dict[str, float]:
+        if not DATA_SOURCES.binance_enabled:
+            return {}
+        try:
+            import ccxt  # type: ignore
+
+            exchange = ccxt.binance()
+            market_symbol = symbol.replace("-USD", "/USDT")
+            ob = exchange.fetch_order_book(market_symbol, limit=50)
+            bid_vol = float(sum(b[1] for b in ob.get("bids", [])))
+            ask_vol = float(sum(a[1] for a in ob.get("asks", [])))
+            spread = float(ob["asks"][0][0] - ob["bids"][0][0]) if ob.get("asks") and ob.get("bids") else np.nan
+            return {"bid_volume": bid_vol, "ask_volume": ask_vol, "spread": spread}
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Binance indisponible pour %s: %s", symbol, exc)
+            return {}
 
     def fetch_coingecko_sentiment_proxy(self, symbol: str) -> DataFrame:
         if not DATA_SOURCES.coingecko_enabled:
@@ -56,7 +80,7 @@ class DataPipeline:
             market_cap_rank = payload.get("market_cap_rank", np.nan)
             return pd.DataFrame(
                 {
-                    "timestamp": [pd.Timestamp.utcnow().normalize()],
+                    "timestamp": [pd.Timestamp.utcnow().normalize().tz_localize(None)],
                     "symbol": [symbol],
                     "sentiment_score": [score],
                     "market_cap_rank": [market_cap_rank],
@@ -69,11 +93,10 @@ class DataPipeline:
     def fetch_fred_macro(self, series_id: str = "DGS10") -> DataFrame:
         if not DATA_SOURCES.fred_enabled:
             return pd.DataFrame()
-        url = "https://fred.stlouisfed.org/graph/fredgraph.csv"
         try:
-            macro = pd.read_csv(f"{url}?id={series_id}")
+            macro = pd.read_csv(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}")
             macro.columns = ["timestamp", "macro_value"]
-            macro["timestamp"] = pd.to_datetime(macro["timestamp"])
+            macro["timestamp"] = pd.to_datetime(macro["timestamp"], utc=True).dt.tz_localize(None)
             macro["macro_value"] = pd.to_numeric(macro["macro_value"], errors="coerce")
             return macro.dropna().reset_index(drop=True)
         except Exception as exc:  # noqa: BLE001
@@ -93,9 +116,31 @@ class DataPipeline:
         if not sentiment.empty:
             price = price.merge(sentiment, how="left", on=["timestamp", "symbol"])
 
+        if request.market == "crypto":
+            micro = self.fetch_binance_orderbook_proxy(request.symbol)
+            for key, value in micro.items():
+                price[key] = value
+
+        # Colonnes optionnelles: valeurs neutres pour éviter de perdre toutes les lignes.
+        for col, default in {
+            "macro_value": np.nan,
+            "sentiment_score": 50.0,
+            "market_cap_rank": np.nan,
+            "bid_volume": 0.0,
+            "ask_volume": 0.0,
+            "spread": 0.0,
+        }.items():
+            if col not in price.columns:
+                price[col] = default
+
         price["log_return"] = np.log(price["close"] / price["close"].shift(1))
         price["realized_volatility_20"] = price["log_return"].rolling(20).std() * np.sqrt(252)
-        return price.dropna().reset_index(drop=True)
+
+        # Fill progressif sur colonnes enrichies, strict minimum sur OHLCV.
+        enriched_cols = ["macro_value", "sentiment_score", "market_cap_rank", "bid_volume", "ask_volume", "spread"]
+        price[enriched_cols] = price[enriched_cols].ffill().bfill().fillna(0)
+        price = price.dropna(subset=["open", "high", "low", "close", "volume", "realized_volatility_20"]).reset_index(drop=True)
+        return price
 
     def persist(self, df: DataFrame, symbol: str) -> str:
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")

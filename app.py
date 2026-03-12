@@ -1,4 +1,4 @@
-"""Point d'entrée de la plateforme quantitative deep learning."""
+"""Point d'entrée de la plateforme quantitative deep learning autonome."""
 from __future__ import annotations
 
 import json
@@ -6,15 +6,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-import torch
 
 from backtesting.engine import BacktestEngine
 from config.settings import INFERENCE, MODEL_DIR, PREDICTIONS_DIR
 from data.pipeline import AssetRequest, DataPipeline
+from features.cycles import CycleRegimeDetector
 from features.engineering import FeatureEngineer
+from models.gnn import gnn_support_status
 from predictions.service import PredictionService
-from training.pipeline import TemporalTrainer
+from training.pipeline import TORCH_AVAILABLE, TemporalTrainer
+from training.strategy_discovery import StrategyDiscovery, try_rl_training_note
 from utils.risk import RiskManager
+from utils.smart_money import SmartMoneyDetector
+
+if TORCH_AVAILABLE:
+    import torch
 
 
 UNIVERSE = [
@@ -40,7 +46,8 @@ def _train_predict_one(request: AssetRequest) -> dict:
     training_result = trainer.walk_forward_train(X, y)
 
     model = training_result.final_model
-    torch.save(model.state_dict(), MODEL_DIR / f"{request.symbol}_hybrid.pt")
+    if TORCH_AVAILABLE and hasattr(model, "state_dict"):
+        torch.save(model.state_dict(), MODEL_DIR / f"{request.symbol}_hybrid.pt")
 
     pred = PredictionService.infer(
         model=model,
@@ -59,18 +66,42 @@ def _train_predict_one(request: AssetRequest) -> dict:
     size = RiskManager.position_size(pred.confidence, float(engineered["realized_volatility_20"].iloc[-1]))
     allowed = RiskManager.allow_trade(drawdown)
 
+    smart_money = SmartMoneyDetector().smart_money_score(
+        volume=engineered["volume"],
+        bid_volume=float(engineered["bid_volume"].iloc[-1]) if "bid_volume" in engineered.columns else None,
+        ask_volume=float(engineered["ask_volume"].iloc[-1]) if "ask_volume" in engineered.columns else None,
+        spread_series=engineered["spread"] if "spread" in engineered.columns else pd.Series(dtype=float),
+        depth_churn_series=engineered["volume"].pct_change().abs().fillna(0),
+    )
+
+    cycle_score = CycleRegimeDetector.spectral_cycle_strength(engineered["close"]) * 100
+    regime = CycleRegimeDetector.market_regime(engineered["close"])
+    explosion_score = CycleRegimeDetector.breakout_squeeze_score(engineered["close"])
+
+    robust_strategies = StrategyDiscovery().select_robust(engineered)
+    best_strategy = robust_strategies[0].name if robust_strategies else "none_robust"
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "asset": pred.asset,
+        "asset_class": request.market,
         "current_price": pred.current_price,
         "horizon": pred.horizon,
         "prob_up": pred.prob_up,
         "prob_down": pred.prob_down,
         "confidence": pred.confidence,
         "factors": pred.explanatory_factors,
+        "market_regime": regime,
+        "cycle_score": cycle_score,
+        "explosion_score": explosion_score,
+        "smart_money_score": smart_money,
+        "strategy_recommended": best_strategy,
         "risk_position_pct": size,
         "trade_allowed": allowed,
         "cv_metrics": training_result.fold_metrics,
+        "training_backend": training_result.backend,
+        "rl_status": try_rl_training_note(),
+        "gnn_status": gnn_support_status(),
         "sharpe": BacktestEngine.sharpe(bt["strategy_ret"]),
         "sortino": BacktestEngine.sortino(bt["strategy_ret"]),
         "max_drawdown": drawdown,
@@ -87,7 +118,6 @@ def run_daily_analysis() -> pd.DataFrame:
 
 
 def run_retraining() -> str:
-    # Dans une version production: orchestration Airflow/Prefect + registre de modèles.
     run_daily_analysis()
     return "retraining_completed"
 
