@@ -56,7 +56,7 @@ if st.button('Lancer la prédiction avec IA'):
         # En réalité, on l'entraînerait sur des milliers de données
         X_p = []
         y_p = []
-        for i in range(60, 160): # Petit échantillon pour aller vite en ligne
+        for i in range(60, len(scaled_prices)): # Petit échantillon pour aller vite en ligne
             X_p.append(scaled_prices[i-60:i, 0])
             y_p.append(scaled_prices[i, 0])
         
